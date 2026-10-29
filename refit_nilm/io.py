@@ -41,6 +41,12 @@ def load_clean_house(path, house, channel=None):
     """CLEAN file -> 1-minute frame: Aggregate, WM (washer), Issues, flat (forward-filled suspect), missing, usable."""
     from .cleaning import flag_flatlines
     ch = channel or C.WASHER_CHANNEL[house]
+    cache_file = C.PROCESSED_DIR / f"clean_house_{house}_ch{ch}_1min.csv"
+    if cache_file.exists():
+        m = pd.read_csv(cache_file, index_col=0)
+        m.index = pd.to_datetime(m.index, utc=True)
+        return m
+
     head = pd.read_csv(path, nrows=0).columns
     unix, agg, wm = _col(head, "unix"), _col(head, "aggregate"), _col(head, f"appliance{ch}")
     cols = [unix, agg, wm] + ([c for c in head if c.strip().lower() == "issues"])
@@ -54,4 +60,9 @@ def load_clean_house(path, house, channel=None):
     m["flat"] = flag_flatlines(m["Aggregate"], C.FLAT_MIN)
     m["issue"] = m["Issues"].fillna(0) > 0
     m["usable"] = ~(m["missing"] | m["flat"] | m["issue"])
+    try:
+        C.PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        m.to_csv(cache_file)
+    except Exception:
+        pass
     return m
