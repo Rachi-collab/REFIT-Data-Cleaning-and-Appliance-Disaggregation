@@ -1,0 +1,13 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.ipynb_checkpoints/
+.jupyter-agent-bridge/
+
+# Large dataset files (REFIT raw and clean files are hundreds of MBs each; download via scripts/download_data.py)
+data/*
+!data/.gitkeep
