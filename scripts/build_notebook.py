@@ -1,0 +1,175 @@
+"""Generates REFIT_Analysis.ipynb (run once; the notebook is what you export to PDF)."""
+import nbformat as nbf
+from pathlib import Path
+
+nb = nbf.v4.new_notebook()
+M = lambda s: nb.cells.append(nbf.v4.new_markdown_cell(s.strip()))
+C = lambda s: nb.cells.append(nbf.v4.new_code_cell(s.strip()))
+
+M("""# REFIT: Data Cleaning and Washing-Machine Disaggregation
+**Flock Energy Take-Home Assignment**  
+*GitHub Repository:* [https://github.com/Rachi-collab/REFIT-Data-Cleaning-and-Appliance-Disaggregation.git](https://github.com/Rachi-collab/REFIT-Data-Cleaning-and-Appliance-Disaggregation.git)  
+*Scenario:* Estimating household appliance consumption from whole-home smart-meter measurements.  
+*Dataset:* REFIT Electrical Load Measurements (University of Strathclyde, 20 UK households, 2013–2015).
+
+This notebook runs end-to-end:
+1. **Raw data inspection and cleaning** (House 1, resampled to 1-minute resolution).
+2. **Exploratory data analysis of washing-machine use** across 10 households (cleaned data).
+3. **Appliance-disaggregation model (NILM)** trained on 6 homes, tuned on 2 homes, and tested on 2 unseen homes.
+4. **Failure analysis and practical utility recommendations** (load-shifting, RCT measurement, UK vs India, 15/30-min data).""")
+
+C("""import sys, importlib.util, os
+from pathlib import Path
+import pandas as pd
+from IPython.display import Image, Markdown, display
+ROOT = Path.cwd()
+if not (ROOT / "refit_nilm").exists(): ROOT = ROOT.parent
+os.chdir(ROOT); sys.path.insert(0, str(ROOT))
+pd.set_option("display.width", 200, "display.max_columns", 30)
+from refit_nilm import config as C
+def run(script):
+    script_path = Path(script)
+    if not script_path.is_absolute():
+        script_path = ROOT / script_path if script_path.parts[:1] == ("scripts",) else ROOT / "scripts" / script_path
+    spec = importlib.util.spec_from_file_location("s", script_path)
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); mod.main()
+def show(*names, width=900):
+    for n in names: display(Image(filename=str(C.FIG_DIR / n), width=width))
+print("data dir:", C.DATA_DIR.resolve()); print("washer channels:", C.WASHER_CHANNEL)""")
+
+M("""## 1. Raw House 1: Inspection and Cleaning to 1-Minute
+### Preprocessing Pipeline:
+1. **Timestamp parsing and ordering**: Convert Unix epoch to UTC datetime. Verify monotonic sorting.
+2. **Duplicate removal**: Drop duplicate timestamps, keeping the first valid record (deterministic rule).
+3. **Physical bounds checking**: Set negative values and sensor spikes > 20,000 W (exceeding UK domestic 100 A / 23 kW cut-out) to NaN.
+4. **Resampling**: Aggregate to 1-minute interval mean.
+5. **Short gap interpolation**: Linearly interpolate gaps <= 5 minutes and flag them (`was_filled`).
+6. **Outage handling**: Flag gaps > 5 minutes as `long_gap` and preserve as NaN (never filled, excluded from model training).""")
+
+C('run("01_clean_house1_raw.py")')
+
+C('''findings_path = C.RESULTS_DIR / "section1_findings.md"
+if findings_path.exists():
+    display(Markdown(findings_path.read_text()))
+else:
+    from refit_nilm.io import find_house_file
+    raw_root = C.RAW_DIR if C.RAW_DIR.exists() else C.DATA_DIR
+    raw_path = find_house_file(raw_root, C.RAW_HOUSE, clean=False)
+    if raw_path is None:
+        message = f"Raw House {C.RAW_HOUSE} CSV was not found under {C.DATA_DIR}."
+    else:
+        message = "Section 1 findings were not generated. Check the error in the previous cell."
+    display(Markdown(f"**Section 1 results unavailable.** {message}"))''')
+
+C('show("s1_before_after_day.png", "s1_coverage_overview.png")')
+
+M("""**Section 1 Interpretation & Findings:**
+- **Raw Data Characteristics:** The raw House 1 Part 2 file spans 377.6 days (2014-06-27 to 2015-07-10) with 4,140,886 rows. Timestamps are strictly in order (0 out-of-order rows), but 14,755 duplicate timestamps (0.36%) were identified and deduplicated.
+- **Irregular Polling & Outages:** While median sampling is 7.0 seconds, polling is asynchronous. There are 3,901 intervals > 30 s and 72 gaps > 5 min. The longest uninterrupted outage was 207.6 hours (~8.65 days, from 2014-07-07 to 2014-07-21). Across the full period, 49.56% of 1-minute intervals were flagged as `long_gap` due to major telemetry/network outages.
+- **Outliers & Physical Plausibility:** There were zero negative power readings. However, 74 aggregate readings and 166 appliance readings exceeded 20,000 W, with corrupt transmission peaks reaching 98,301 W. Setting these to NaN eliminates severe telemetry spikes.
+- **Before vs After Cleaning:** Resampling to 1-minute means smooths high-frequency sensor noise while preserving the distinct appliance pulses (e.g. 2 kW water-heating spikes and intermittent motor pulses). Gaps <= 5 min were safely interpolated (8,310 minutes), while long outages remain cleanly segmented as NaNs without distorting aggregate consumption.""")
+
+M("""## 2. Washing-Machine EDA (Cleaned Data, 10 Houses)
+### Active Cycle Definition:
+- **Threshold (`ON_W = 10.0 W`):** A machine drawing > 10 W is actively operating (standby power is 1–4 W).
+- **Minimum Duration (`MIN_CYCLE_MIN = 10 min`):** Standby blips and transient electrical spikes are filtered out.
+- **Pause Merging (`MERGE_GAP_MIN = 5 min`):** Washing machines pause during soak, rinse, and water-drain cycles; on-runs separated by <= 5 minutes are merged into a single continuous cycle.""")
+
+C('run("02_washing_machine_eda.py")')
+
+C('''display(pd.read_csv(C.RESULTS_DIR / "eda_house_summary.csv"))
+display(pd.read_csv(C.RESULTS_DIR / "eda_cycle_characteristics_by_house.csv"))''')
+
+C('show("s2_usage_by_hour_dow.png", "s2_representative_24h.png", "s2_detected_cycles.png", "s2_cross_house_comparison.png")')
+
+M("""**Section 2 Interpretation & EDA Insights:**
+- **Availability & Inactivity:** Across 10 houses and over 8.1 million minutes (4,688 usable days), washing machines spend **91.1% to 98.6% of usable time completely OFF**. Household usage averages 5.3 to 14.7 cycles per week.
+- **Temporal Patterns (Hour & Day of Week):**
+  - **Weekly Distribution:** Laundry is predominantly a weekend activity, peaking on **Saturday (1,079 cycles, 19.3%)** and **Friday (886 cycles, 15.9%)**.
+  - **Diurnal Distribution:** Activity exhibits a strong **morning peak between 08:00 and 11:00 UTC** (peaking at 08:00 with 500 cycle starts) and a secondary **evening peak between 17:00 and 19:00 UTC** (378 starts at 18:00, 321 at 19:00). Overnight starts (00:00–05:00) account for under 7% of total cycles.
+- **Cross-Household Heterogeneity:**
+  - **Duration:** Varies widely from a median of **31–36 minutes** (Houses 1, 5, 15, 17 using rapid/eco washes) to **72–94 minutes** (Houses 2, 10, 16 using standard intensive programmes).
+  - **Peak Power & Energy:** Houses 1, 2, 7, 10, 15, and 16 show median peaks of **2,000–2,226 W** and cycle energies of **350–588 Wh**, reflecting internal resistive water heating. Conversely, Houses 5, 17, 19, and 21 exhibit median peaks of **364–565 W** and cycle energies of **56–112 Wh**, characteristic of cold-fill washes, lower wash temperatures, or hot-water tap feeds.""")
+
+M("""## 3. Estimating Washer Power from Aggregate (Disaggregation Model)
+### Methodology & Validation Design:
+- **Household-Level Split (Zero Leakage):**
+  - **Train Houses (6):** 1, 2, 5, 7, 10, 15 (380,880 minutes, balanced by keeping 10% of off-state rows).
+  - **Validation Houses (2):** 16, 17 (used strictly to tune tree hyper-parameters).
+  - **Test Houses (2):** 19, 21 (held out completely, evaluated once).
+  - *Why household split?* Consecutive minutes within a single home have massive temporal autocorrelation; a random train/test split would cause catastrophic data leakage and exaggerate performance.
+- **Model:** `HistGradientBoostingRegressor` on a **31-minute sliding window** of the aggregate signal (15 min past, center minute, 15 min future) + window summary statistics + hour and weekday.
+- **Baselines:**
+  1. *Always-Off Baseline*: Always predicts 0 W.
+  2. *Hour × Day-of-Week Profile Baseline*: Predicts empirical mean washer power for that (weekday, hour) cell.
+- **Post-Processing:** Clip predictions to `[0, Aggregate]`, zero values < 5 W, and remove isolated on-runs < 10 minutes.""")
+
+C('run("03_disaggregate.py")')
+
+C('''display(pd.read_csv(C.RESULTS_DIR / "model_test_metrics.csv").round(3))
+display(pd.read_csv(C.RESULTS_DIR / "model_test_metrics_mean_over_houses.csv").round(3))
+display(pd.read_csv(C.RESULTS_DIR / "model_test_cycle_level.csv").round(3))''')
+
+C('show("s3_actual_vs_predicted_day.png", "s3_actual_vs_predicted_cycle_zoom.png", "s3_daily_energy_scatter.png")')
+
+M("""**Section 3 Interpretation & Model Evaluation:**
+- **The "Always Off" Evaluation Paradox:** The always-off baseline achieves an artificially low MAE of **0.70 W** and RMSE of **21.4 W** simply because the washing machine is inactive >97% of the year. This proves that standard regression metrics (MAE/RMSE) are misleading for sparse NILM applications without state-based metrics.
+- **Superior Detection Performance:** The Gradient Boosting model substantially outperforms the profile baseline:
+  - **On-State Recall:** **80.8%** vs 40.3% (profile) and 0% (always off).
+  - **Cycle-Level Recall:** **76.4%** across test homes (21 of 30 cycles found in House 19; 72 of 87 cycles found in House 21).
+  - **Cycle F1 Score:** 0.062 vs 0.016 (profile), representing a 4x improvement in detection accuracy.
+- **Precision Trade-Off:** Minute-level precision is **3.3%** and cycle precision is **4.1%**. In whole-home aggregates, other motor and resistive loads (kettles, ovens, dishwashers, heaters) produce overlapping signatures that trigger false positive cycles.
+- **Energy Estimation:** Daily energy predictions (`figures/s3_daily_energy_scatter.png`) capture general usage trends, although total energy is over-estimated during days with heavy overall household electricity demand due to false triggers.""")
+
+M("""## 4. Failure Analysis""")
+
+C('''display(pd.read_csv(C.RESULTS_DIR / "failure_error_by_other_load.csv").round(1))
+ms = pd.read_csv(C.RESULTS_DIR / "failure_missed_cycles.csv"); print("missed cycles:", len(ms)); display(ms.head(10))''')
+
+C('show("s3_failure_error_vs_other_load.png", width=600)')
+
+M("""**Failure Analysis Insights:**
+1. **Error vs Overlapping Background Load:**
+   - When other household load is light (< 800 W), active washer MAE is moderate (**61.8 W to 74.0 W** in House 19).
+   - When overlapping load exceeds **2,000 W** (e.g. oven, kettle, electric heater active simultaneously), MAE escalates dramatically to **225.6 W** in House 19 and **254.2 W** in House 21, with large positive bias (+205.7 W). The model misattributes parts of concurrent high-power loads to the washing machine.
+2. **Missed Cycles (24 total across test homes):**
+   - In House 19, 9 cycles were missed; in House 21, 15 cycles were missed.
+   - *Root Cause:* Missed cycles almost exclusively correspond to low-power programmes without heating (e.g. House 19 on 2014-08-01 13:08 UTC with peak 81 W; 2014-05-16 07:31 UTC with peak 110 W). When a machine runs a cold rinse/spin cycle, its 80–110 W signal is drowned out by the 250–350 W household baseline noise.""")
+
+M(r"""## 5. Practical Implications & Recommendations (Section 4)
+
+### 1. Opportunity: Evening Peak Load Shifting
+- **Finding:** 17.5% of washing cycles start between 17:00 and 19:00 UTC (378 starts at 18:00, 321 at 19:00), directly coinciding with peak grid demand and highest marginal generation emissions.
+- **Intervention:** A utility-sponsored behavioral nudge campaign integrated with Time-of-Use (ToU) tariffs or smart home apps (e.g. "Run your laundry after 21:00 or between 08:00–11:00 to save £X / avoid peak carbon").
+- **Measurement via Randomized Controlled Trial (RCT):**
+  - Cohort of 2,000 smart-metered homes split into Treatment (nudge + off-peak incentive) and Control (standard flat rate).
+  - Evaluated using a **Difference-in-Differences (DiD)** regression model:
+    $$\Delta \\text{PeakShare}_{i,t} = \\alpha + \\beta_1 \\text{Treatment}_i + \\beta_2 \\text{Post}_t + \\beta_3 (\\text{Treatment}_i \\times \\text{Post}_t) + \\epsilon_{i,t}$$
+  - $\\beta_3$ isolates the true causal reduction in peak-hour washing share attributable to the intervention. A sub-sample of 50 homes with physical IoT smart plugs provides ground-truth validation.
+
+### 2. Limitations & UK vs India Context
+- **Overlapping Signatures:** Concurrent resistive loads (kettles, ovens, heaters) create false positives and degrade disaggregation precision.
+- **Data Quality & Gaps:** Long sensor dropouts (up to 49.6% in raw data) must be explicitly flagged to prevent models from learning artificial interpolated patterns.
+- **Transferability from UK to India:**
+  - *Grid Quality:* UK homes have stable 230 V / 50 Hz power; Indian grids experience frequent voltage fluctuations and power outages, creating interrupted cycles.
+  - *Appliance Archetypes:* UK homes predominantly use front-loading automatic machines with 2 kW electric heating elements. Indian homes commonly use top-loading or semi-automatic twin-tub machines (~300–500 W motor only, manual cold water fill), which exhibit completely different load signatures.
+  - *Habits & Weather:* Abundant solar heat in India drives daytime outdoor line drying rather than tumble drying, and washing schedules align with municipal water supply hours.
+
+### 3. What Gets Harder with 15-Minute or 30-Minute Smart-Meter Data?
+- A standard 45-to-60-minute washing cycle is compressed into only **2 to 4 data points** at 15-minute intervals, and just **1 to 2 points** at 30-minute intervals.
+- **Transient Features Vanish:** The 2 kW heating spike (lasting 5–15 min), the 400 W spin bursts, and the characteristic low-power soaking pauses are averaged out with baseload, fridge cycling, and television use.
+- **Implication:** Cycle-level detection and exact start-time identification become largely impossible. However, **aggregate energy estimation** over multi-week periods and **broad time-of-day shifting trends** can still be estimated using regression or energy-budgeting NILM methods.""")
+
+M("""## AI Tools Used
+Claude (Anthropic) and Gemini (Google) assisted in exploring codebase structure, debugging file matching patterns, verifying metrics calculations, and drafting documentation. All generated code, statistical tables, and interpretations were thoroughly reviewed, executed, and verified against the official REFIT dataset.
+
+## References
+1. Murray, D., Stankovic, L., & Stankovic, V. (2017). An electrical load measurements dataset of United Kingdom households from a two-year longitudinal study. *Scientific Data*, 4, 160122.
+2. Hart, G. W. (1992). Nonintrusive appliance load monitoring. *Proceedings of the IEEE*, 80(12), 1870-1891.
+3. Kelly, J., & Knottenbelt, W. (2015). Neural NILM: Deep neural networks applied to energy disaggregation. *ACM BuildSys*, 55-64.
+4. Zhang, C., Zhong, M., Wang, Z., Goddard, N., & Sutton, C. (2018). Sequence-to-point learning with neural networks for non-intrusive load monitoring. *AAAI Conference on Artificial Intelligence*, 32(1).
+5. Batra, N., Kelly, J., Parson, O., Dutta, H., Knottenbelt, W., Rogers, A., Singh, A., & Srivastava, M. (2014). NILMTK: an open source toolkit for non-intrusive load monitoring. *ACM e-Energy*, 265-276.""")
+
+nb.metadata["kernelspec"] = {"name": "python3", "display_name": "Python 3", "language": "python"}
+nbf.write(nb, Path(__file__).resolve().parents[1] / "REFIT_Analysis.ipynb")
+print("Successfully generated complete REFIT_Analysis.ipynb")
