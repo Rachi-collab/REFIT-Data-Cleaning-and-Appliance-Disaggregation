@@ -64,5 +64,3 @@ Add a CNN/seq2point model for comparison; more test houses and leave-one-house-o
 - Zhang, C. et al. (2018). Sequence-to-point learning with neural networks for non-intrusive load monitoring. *AAAI*.
 - Batra, N. et al. (2014). NILMTK: an open source toolkit for non-intrusive load monitoring. *e-Energy*.
 - REFIT cleaned-data readme (Strathclyde).
-
-*(Verify these citations against the originals before submitting.)*
