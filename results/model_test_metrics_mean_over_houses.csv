@@ -1,0 +1,4 @@
+predictor,MAE_W,RMSE_W,SAE,precision,recall,F1_on
+always_off,0.698,21.39,1.0,0.0,0.0,0.0
+gradient_boosting,10.801,47.228,11.912,0.033,0.808,0.062
+hour_dow_profile,5.782,23.539,10.747,0.008,0.403,0.016
